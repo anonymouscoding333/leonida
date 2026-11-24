@@ -1,0 +1,757 @@
+diff --git a/README.md b/README.md
+index 103cb90..37b0e7e 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ npm run smoke      # headless boot check (writes docs/screenshots/<name>.png + .
+ 
+ See [docs/PROGRESS.md](docs/PROGRESS.md) for the authoritative, per-system status (works / cut / known bugs / how to test). Current build: typechecked, unit-tested, code-reviewed and boots headlessly with zero console errors (`npm run smoke`), but it has had **very little hands-on play-testing** — expect rough edges and please report them.
+ 
+-- **World**: 2 km × 2 km Vice City with six districts (Vice Beach, Downtown, Little Habana, Port Gellhorn, the Docks, Grassrivers), a causeway, highways, water, and a 24-minute day/night cycle with neon and street lamps at dusk. No swimming, weather or boats.
++- **World**: 2 km × 2 km Vice City with six districts (Vice Beach, Downtown, Little Habana, Port Gellhorn, the Docks, Grassrivers), a causeway, highways, water, and a 24-minute day/night cycle with neon and street lamps at dusk, and seagull flocks that circle the shoreline by day and scatter at gunfire. No swimming, weather or boats.
+ - **On foot**: third-person GTA camera, sprint, jump, aim, health/armor, WASTED → hospital.
+ - **Vehicles**: nine archetypes (sedan, sports, muscle, SUV, pickup, van, taxi, police, SWAT), arcade single-body physics on Rapier (no per-wheel suspension), damage → smoke → fire → explosion, carjacking, traffic with lights and car-following, parked cars everywhere. No motorcycles or boats.
+ - **Pedestrians**: instanced crowds that wander, chat, cower, flee, call the cops, fight back, and ragdoll; cash/weapon/armor/health pickups.
+@@ -50,7 +50,7 @@ See [docs/PROGRESS.md](docs/PROGRESS.md) for the authoritative, per-system statu
+ - **Story**: eight missions for Lucia and Jason with cutscenes, two repeatable jobs after the finale, an AI companion, Q character switching and the Caps Lock adrenaline ability.
+ - **Meta**: minimap and full map with GPS routing, HUD, notifications, pause menu with settings, phone (contacts, map, Snapmatic, parody feed), per-system save/load (wanted level and police units are not saved).
+ 
+-Known first-run blocker: the player, peds and pickups are currently invisible inside interiors (they are parented to the hidden world root); see `docs/PROGRESS.md` §4.
++Note: the old "invisible inside interiors" blocker is fixed in code (actors live under `actorsRoot`) but has not been re-verified in a browser; see `docs/PROGRESS.md` §4.
+ 
+ ## Debugging
+ 
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+new file mode 100644
+index 0000000..4362c3b
+--- /dev/null
++++ b/docs/ARCHITECTURE.md
+@@ -0,0 +1,52 @@
++# LEONIDA — Architecture review
++
++This was a read-through of `src/core`, the system registry, the scene-graph ownership rules and a sample of systems (pickups, peds, vehicles, interiors, player, world). `docs/ARCHITECTURE.md` was a listed deliverable in TEAM-PLAN §5 that never got written; this fills the gap. It records what is already good, what was changed in this pass, and what is worth doing next. Nothing here was run in a browser (see "Verification" at the end).
++
++## How it fits together
++
++```
++main → Game (core)
++        ├─ services: Events (typed bus), Input, Time, Physics (Rapier), Save, Perf, Debug
++        ├─ scene roots: worldRoot (city, hidden indoors) · interiorRoot · actorsRoot (always visible)
++        └─ SystemRegistry ← systems discovered via import.meta.glob('../systems/*/index.ts')
++```
++
++- **A system is a folder** with an `index.ts` that default-exports `{ id, priority, create(game) }` and returns a `GameSystem` (`init`, optional `fixedUpdate`, `update`, `serialize`, `deserialize`, `dispose`, `debugActions`). Priority bands are in `src/core/System.ts`.
++- **Systems talk through typed contracts**, not imports of each other: `src/core/peers.ts` defines `IVehiclesPeer`, `IPedsPeer`, `IDamagePeer`, and so on. `Game` exposes them as optional getters (`game.peds?.…`), so any system can be absent. Cross-system *facts* go over the typed event bus (`src/core/Events.ts`).
++- **Fault isolation**: a system that throws in `init`, `update` or `fixedUpdate` is logged, disabled for the session, and the loop keeps running. Isolation sets (`?systems=world,player,camera`) make every system testable alone.
++- **Pure logic is separated from rendering** where it pays off (`src/casino`, road graph, spatial hash, wanted machine) and is unit-tested without a browser.
++
++## What is good (keep it)
++
++1. Contracts-over-imports (`peers.ts` + `Events.ts`) is the right shape for a codebase written by several agents or people in parallel.
++2. Lazy, glob-discovered systems with per-system fault isolation and `debugActions` make the game unusually debuggable (`__game.debug.run(...)`, `&actions=`, `&autotest=`).
++3. Data tables live in `src/data`, per-system tunables in `config.ts` files, so balancing does not touch logic.
++4. Fixed-step physics with an interpolation `alpha` and a capped substep count prevents the death spiral after a hitch.
++5. Instanced renderers with pooled slots (pickups, peds, vehicles, particles) keep draw calls flat.
++
++## Changes made in this pass
++
++| Change | Why |
++|---|---|
++| `Game.frame` / `Game.fixedStep` no longer allocate two closures per system per tick; they use an inline `try/catch` that calls the same `disable` path. | The loop ran ~30 systems at 60 Hz, so this removed up to roughly 3,600 short-lived closures per second. Behaviour is identical: a throwing system is still disabled and reported. |
++| The window `resize` listener is stored and removed in `Game.dispose`. | It was an anonymous arrow that was never removed. |
++| New system `ambient` (seagull flocks), `PRIORITY.ambient = 240`. | "Make the world feel alive" without touching any other system. See [progress/ambient.md](progress/ambient.md). |
++| `docs/PROGRESS.md` §1 and §4 corrected; README note updated. | Four listed "known issues" (invisible in interiors, run-over kills bypassing `damage.apply`, double hospital fee, airborne-save fall) are already fixed in code; the docs still described the pre-fix state. |
++
++## Recommended next steps (not done)
++
++Ordered by value for effort. None were attempted blind because the project's dependencies could not be installed in the review environment, so there was no way to run the tests or the game after a refactor.
++
++1. **Browser QA first.** The README itself says the build has had very little hands-on play-testing, and every autotest is unexecuted. Run `npm install && npm test && npm run smoke`, then run the autotests (`&autotest=<n>`). Fix what fails before adding features.
++2. **Split the files over the ~400-line guideline**: `RoadGraph.ts` (480), `Ped.ts` (473), `peds/index.ts` (433), `Vehicle.ts` (430), `police/index.ts` (420). The seams are visible: ped spawning vs. event wiring in `peds/index.ts`; a physics-body helper out of `Vehicle.ts`.
++3. **Remove the `PedProxy` stopgap in `shops`** once interiors are confirmed to show the real actors.
++4. **Replace the polled `E` key** shared by casino stations and interior exit with an interaction-prompt registry (one system owns "what does E do here", others register prompts). This is the one place where systems implicitly compete for an input.
++5. **Make save/load a tested contract.** Each system implements `serialize`/`deserialize`, but the README notes it has not been exercised end to end. A round-trip test (`serialize → deserialize → serialize` is stable) per system would catch most bugs cheaply, and wanted level and police units are deliberately not saved today.
++6. **Replace string-keyed `perf.set('name', n)` and `debug.run('id.action')`** with typed keys if the system count keeps growing. Typos currently fail silently.
++7. **Bigger-ticket "alive" ideas**, once the above are stable: audible ambience tied to the gull flocks, weather (rain/wind recipes already exist in audio), ped gestures and idle chatter, traffic yielding and overtaking, a garage interior for the chop shop.
++
++## Verification
++
++- `tests/ambient/flock.test.ts` is new (vitest). Its logic was also run outside vitest with `tsx` and `node:assert` against the real source, and every check passed.
++- A scoped `tsc` run over the new ambient files and `Game.ts` / `System.ts` showed no errors attributable to these changes. It could not be a full `npm run typecheck`, because `node_modules` (three, rapier, vite, vitest) was not installable in that environment.
++- Nothing was run in a browser. Treat the seagulls' look (size, speed, altitude, flap) as a first draft to tune in `src/systems/ambient/config.ts`.
+diff --git a/docs/PROGRESS.md b/docs/PROGRESS.md
+index 92a6f30..6af0337 100644
+--- a/docs/PROGRESS.md
++++ b/docs/PROGRESS.md
+@@ -13,23 +13,24 @@ Status legend: **Done-untested** = implemented, typechecked, unit-tested where a
+ | System id | Status | Owner doc | Key debug actions | Autotest(s) | Top known issues |
+ |---|---|---|---|---|---|
+ | `world` | In progress (no progress doc; foundation autotest + integration review only) | [integration-stage2.md](progress/integration-stage2.md) | `world.goto:<landmarkId>`, `world.landmarks`, `world.stats`, `world.night`, `world.inWater`, `world.ground` | `foundation` (`astar-20-random-pairs`, `landmark-doors-near-road-nodes`, `static-draw-calls-under-400`, `dusk-turns-lamps-on`, `water-query`) | Async city build can finish after dependent systems init (peds allow 8 s). Draw-call budget unmeasured. |
+-| `player` | In progress (no progress doc) | [integration-stage2.md](progress/integration-stage2.md) | `player.teleport:<x>:<z>[:<heading>]`, `player.pos`, `player.damage:<n>`, `player.kill[:busted]`, `player.heal`, `player.armor:<n>`, `player.face:<rad>` | `foundation` (`walk-20m`, `jump-raises-player`, `damage-armor-death-respawn`) | Hospital fee is 10 % (player) vs 5 % min $100 (economy design); only one is charged. `Continue` from an airborne save falls one frame (no ground snap in `deserialize`). |
++| `player` | In progress (no progress doc) | [integration-stage2.md](progress/integration-stage2.md) | `player.teleport:<x>:<z>[:<heading>]`, `player.pos`, `player.damage:<n>`, `player.kill[:busted]`, `player.heal`, `player.armor:<n>`, `player.face:<rad>` | `foundation` (`walk-20m`, `jump-raises-player`, `damage-armor-death-respawn`) | Hospital fee is owned by `economy` (5 %, min $100); `player` only bills bail. `deserialize` goes through `teleport`, which snaps to the ground. |
+ | `camera` | In progress (no progress doc) | [integration-stage2.md](progress/integration-stage2.md) | `camera.setOrbit`, `camera.setMode:<mode>`, `camera.shake`, `camera.moveTo`, `camera.orbit`, `camera.restore`, `camera.state` | `foundation` (`camera-modes-and-cinematic`) | Sniper `fovKick(-25)` fights the aim FOV; snaps back over the camera's own recovery. `C` in vehicles is a no-op (camera owns distance). |
+ | `vehicles` | Done-untested | [vehicles.md](progress/vehicles.md) | `vehicles.spawn:<arch>:<x>:<z>[:<heading>]`, `vehicles.spawnHere:<arch>`, `vehicles.enterNearest`, `vehicles.exit`, `vehicles.explodeCurrent`, `vehicles.count`, `vehicles.state`, `vehicles.despawnAll` | `vehicles` | Single ground probe: nose over a kerb → brief loss of steering. Hitting a sleeping parked car damages the mover more until the parked body wakes. |
+ | `traffic` | Done-untested | [vehicles.md](progress/vehicles.md) | `traffic.setDensity:<n>`, `traffic.count`, `traffic.panic`, `traffic.lights`, `traffic.stuck`, `traffic.stalled[:<s>]` | `traffic` | Nose-to-tail queues restart with a lag chain and the tail catches the next red. No yielding at unlit intersections, no overtaking. |
+-| `peds` | Done-untested | [peds.md](progress/peds.md) | `peds.spawn:<type>:<x>:<z>`, `peds.spawnHere:<type>`, `peds.count`, `peds.stats`, `peds.state:<id>`, `peds.aimAt[:<id>]`, `peds.gunshot`, `peds.ragdollNearest`, `peds.killNearest`, `peds.ragdoll:<id>`, `peds.damage:<id>:<n>[:<type>]`, `peds.setDensity:<n>`, `peds.fastForward:<s>` | `peds` | Run-over kills bypass `damage.apply` → no `entity:killed`/`kill_ped` crime. Ragdolls jitter on moving vehicle roofs before freezing. |
+-| `pickups` | Done-untested | [peds.md](progress/peds.md) | `pickups.spawn:<kind>:<value>[:<weaponId>]`, `pickups.count`, `pickups.clear` | `peds` (cower → cash pickup → collect) | Pickups invisible inside interiors until the actors-root fix lands (still collectable). |
++| `peds` | Done-untested | [peds.md](progress/peds.md) | `peds.spawn:<type>:<x>:<z>`, `peds.spawnHere:<type>`, `peds.count`, `peds.stats`, `peds.state:<id>`, `peds.aimAt[:<id>]`, `peds.gunshot`, `peds.ragdollNearest`, `peds.killNearest`, `peds.ragdoll:<id>`, `peds.damage:<id>:<n>[:<type>]`, `peds.setDensity:<n>`, `peds.fastForward:<s>` | `peds` | Run-overs go through `damage.apply` (kill attribution and `kill_ped` work). Ragdolls jitter on moving vehicle roofs before freezing. |
++| `pickups` | Done-untested | [peds.md](progress/peds.md) | `pickups.spawn:<kind>:<value>[:<weaponId>]`, `pickups.count`, `pickups.clear` | `peds` (cower → cash pickup → collect) | Pickups live under `actorsRoot`, so they stay visible inside interiors. |
+ | `weapons` | Done-untested | [weapons.md](progress/weapons.md) | `weapons.give:<id>:<ammo>`, `weapons.equip:<id>`, `weapons.fire`, `weapons.reload`, `weapons.state`, `weapons.spawnDummy:<x>:<z>`, `weapons.dummies`, `weapons.clearDummies`, `weapons.aimAssist[:bool]` | `weapons` | No gun meshes / arm swing on the player rig. Drive-by fires along camera forward with no window-side restriction. |
+ | `damage` | Done-untested | [weapons.md](progress/weapons.md) | `damage.explode:<x>:<z>:<radius>:<damage>`, `damage.player` | `weapons` (explode falloff, headshot ×3) | Kill attribution only for hits routed through `damage.apply` (see peds). |
+ | `particles` | Done-untested | [weapons.md](progress/weapons.md) | `particles.emit:<id>:<x>:<z>`, `particles.count`, `particles.clear` | `weapons` (`particle pools bounded`) | Unsorted, unlit single-draw-call pools; no soft particles. |
+ | `navigation` | Done-untested | [ui.md](progress/ui.md) | `navigation.waypoint:<x>:<z>`, `navigation.clear`, `navigation.route`, `navigation.blips` | `ui` (`waypoint-route`, `landmark-blips`, `waypoint-clears-on-arrival`) | Blips not clustered on the full map; mission/contact labels only in the legend. |
+ | `ui` | Done-untested | [ui.md](progress/ui.md) | `ui.notify:<text>:<kind>`, `ui.card:<kind>:<text>[:<s>]`, `ui.dialogue`, `ui.objective:<text>`, `ui.progress:<f>`, `ui.title`, `ui.pause`, `ui.resume`, `ui.map`, `ui.state` | `ui` | Layout at 1440×900 / 1920×1080 never screenshot-reviewed. No HUD ability meter yet (missions request). |
+ | `audio` | Done-untested | [audio.md](progress/audio.md) | `audio.playAll`, `audio.voices`, `audio.radio:<bool>`, `audio.bus:<bus>:<vol>`, `audio.state` | `audio` | No listening pass; levels untuned. Loops started before the first gesture can bunch events at resume. |
+-| `casino` | Done-untested | [casino.md](progress/casino.md) | `casino.enter`, `casino.buy:<n>`, `casino.cashout:<n>`, `casino.chips`, `casino.play:<game>`, `casino.rig:<game>:<json>`, `casino.close`, `casino.lock[:days]`, `casino.unlock` | `casino` | Player/guards invisible inside until the actors-root fix. Banned kick-out shows one frame of the interior before fading. |
+-| `interiors` | Done-untested (framework: foundation; content: shops/casino) | [shops.md](progress/shops.md), [casino.md](progress/casino.md) | `interiors.enter:<id>`, `interiors.exit`, `interiors.list`, `interiors.current` | `foundation` (`interiors-enter-exit`), `shops` (`interiors-registered`) | **Player, peds and pickups are parented to `worldRoot`, which is hidden indoors → invisible in every interior** (shops uses `PedProxy` rigs as a stopgap). Casino station `E` and exit `E` both poll the same key. |
+-| `economy` | Done-untested | [shops.md](progress/shops.md) | `economy.add:<n>`, `economy.set:<n>`, `economy.get`, `economy.fee:<fraction>:<reason>`, `economy.stats` | `foundation` (`economy-wallet`), `shops` (`hospital-fee-once`) | Two hospital-fee owners (player 10 % vs economy 5 %); guarded against double charge, but the design number is not what is charged. |
++| `casino` | Done-untested | [casino.md](progress/casino.md) | `casino.enter`, `casino.buy:<n>`, `casino.cashout:<n>`, `casino.chips`, `casino.play:<game>`, `casino.rig:<game>:<json>`, `casino.close`, `casino.lock[:days]`, `casino.unlock` | `casino` | Banned kick-out shows one frame of the interior before fading. |
++| `interiors` | Done-untested (framework: foundation; content: shops/casino) | [shops.md](progress/shops.md), [casino.md](progress/casino.md) | `interiors.enter:<id>`, `interiors.exit`, `interiors.list`, `interiors.current` | `foundation` (`interiors-enter-exit`), `shops` (`interiors-registered`) | Player, peds and pickups are parented to `actorsRoot` (not hidden indoors); shops still draws clerks/guards through `PedProxy` rigs, which is now redundant and could be removed after browser QA. Casino station `E` and exit `E` both poll the same key. |
++| `economy` | Done-untested | [shops.md](progress/shops.md) | `economy.add:<n>`, `economy.set:<n>`, `economy.get`, `economy.fee:<fraction>:<reason>`, `economy.stats` | `foundation` (`economy-wallet`), `shops` (`hospital-fee-once`) | Single hospital-fee owner (economy, 5 %, min $100). |
+ | `shops` | Done-untested | [shops.md](progress/shops.md) | `shops.open:<gunstore\|phone>`, `shops.closeUi`, `shops.buy:<weaponId\|armor>`, `shops.food`, `shops.close:<storeId>`, `shops.reopen:<storeId>`, `shops.list`, `shops.status`, `shops.armClerk:<bool>`; also registers `phone.open/close/snap/app/feed`, `respray.spray/position` | `shops` | Clerk shotgun (accuracy 0.45 at close range) may be lethal fast. `data/weapons.ts` prices differ from `data/prices.ts` (store charges `prices.ts`). |
+-| `robbery` | Done-untested | [shops.md](progress/shops.md) | `robbery.start:<storeId>`, `robbery.status`, `robbery.skip:<s>`, `robbery.abort` | `robbery` | Register cash pickup invisible indoors (collectable). Store reopen is `time.day`-based, so debug clock jumps reopen stores. |
++| `robbery` | Done-untested | [shops.md](progress/shops.md) | `robbery.start:<storeId>`, `robbery.status`, `robbery.skip:<s>`, `robbery.abort` | `robbery` | Store reopen is `time.day`-based, so debug clock jumps reopen stores. |
++| `ambient` | Done-untested (new) | [ambient.md](progress/ambient.md) | `ambient.scare`, `ambient.flocks` | none (logic covered by `tests/ambient/flock.test.ts`) | Seagulls only; no audio; gulls are not occluded by interiors beyond the world-root hide. |
+ | `chopshop` | Done-untested (registered from `shops`, no own folder) | [shops.md](progress/shops.md) | `chopshop.value`, `chopshop.sell`, `chopshop.wanted`, `chopshop.setWanted:<arch>`, `chopshop.position` | `robbery` (`chop-shop-sells-sports`) | Drive-in sphere in front of the garage door, no garage interior. Registered by `ShopSystem.init` rather than discovered from `src/systems/chopshop/`. |
+ | `wanted` | Done-untested | [wanted.md](progress/wanted.md) | `wanted.set:<level>[:<state>]`, `wanted.clear`, `wanted.state`, `wanted.crime:<type>[:loud]`, `wanted.fastForward:<s>`, `wanted.seen`, `wanted.heat:<n>` | `wanted` | Only heat is serialized; a loaded game starts at level 0. `steal_police_vehicle` re-fires when re-entering an owned cruiser (5 s cooldown). |
+ | `police` | Done-untested | [wanted.md](progress/wanted.md) | `police.spawnCruiser[:police\|swat]`, `police.spawnCop[:x:z:weapon]`, `police.units`, `police.roadblock[:spikes]`, `police.heli`, `police.clear` | `police` | WASTED card/sting flashes one frame before BUSTED (UI request pending). Ramming is a predicted-position charge, not a PIT; roadblock planning fails on bends/water and retries. |
+@@ -119,9 +120,10 @@ Core (not a system) debug actions: `time.set:<hour>`, `time.scale:<s>`, `time.cl
+ ## 4. Known issues (compiled, deduplicated)
+ 
+ **Cross-system (from the integration review)**
+-- Player, peds and pickups hang off `game.worldRoot`, which `Interiors.enter` hides → **everyone is invisible inside every interior** (casino, stores); shops draws clerks/guards through `PedProxy` rigs as a stopgap. Fix proposed in [shops.md](progress/shops.md) integration request 1 (`actorsRoot`). Highest priority for browser QA.
+-- Run-over kills (vehicle contact damage) bypass `damage.apply` → no `entity:killed` and no `kill_ped` crime.
+-- Hospital fee: player system charges 10 %, economy would charge 5 % min $100; only one runs, but the design number is not honoured.
++- ~~Player/peds/pickups invisible inside interiors~~ **Fixed in code**: `Game.actorsRoot` is a sibling of `worldRoot`; `Player`, `PedRenderer` and `PickupRenderer` use it. Still needs a browser check (and the shops `PedProxy` stopgap can then be dropped).
++- ~~Run-over kills bypass `damage.apply`~~ **Fixed**: `PedSystem.onVehicleContact` routes through `damage.apply`.
++- ~~Hospital fee has two owners~~ **Fixed**: `economy` owns it; `player` bills bail only.
++- ~~`Player.deserialize` falls one frame~~ **Fixed**: it goes through `teleport(..., snapToGround = true)`.
+ - Casino station `E` and interior-exit `E` poll the same key (harmless with the current layout).
+ - `Player.deserialize` teleports without a ground snap; an airborne save falls one frame on Continue.
+ - `Vehicle.ts` (430), `Ped.ts` (~470), `WeaponSystem` (404), `CasinoSystem` (408), `MissionSystem` (~405) exceed the ~400-line guideline.
+diff --git a/docs/progress/ambient.md b/docs/progress/ambient.md
+new file mode 100644
+index 0000000..4208c1a
+--- /dev/null
++++ b/docs/progress/ambient.md
+@@ -0,0 +1,33 @@
++# ambient
++
++Cosmetic world life that no other system owns. Folder: `src/systems/ambient/`. Priority 240 (after pickups, before weapons). Nothing here is saved and nothing affects gameplay.
++
++## What exists
++
++- **Seagull flocks.** 5 flocks (31 birds) circle just offshore at the beach (east), the port (north) and the docks (south). One `InstancedMesh`, one draw call, parented to `worldRoot` so interiors hide it for free.
++- **Behaviour.** Each bird orbits its flock anchor at its own radius, altitude and speed, banks into the turn, and bobs slightly. By day they glide; the wing flap (Y-scale squash on the instance) is a gentle shimmer.
++- **Reactions.** A `weapon:fired` within 70 m of a flock anchor, or a `vehicle:exploded` within 180 m, scatters it: the orbit widens and lifts, the birds speed up and flap hard, then settle over 7 s.
++- **Day/night.** Birds shrink out between `night01` 0.55 and 0.85 and are hidden at night.
++- **Culling.** No per-frame work when the camera is farther than about 570 m from every flock, or inside an interior.
++
++## Files
++
++| File | Role |
++|---|---|
++| `config.ts` | Flock anchors and every tunable. Change look and feel here. |
++| `flock.ts` | Pure math (orbit, scare easing, night fade). Unit-tested. |
++| `SeagullRenderer.ts` | Gull geometry (body, tail, two wings with darker tips) and the instanced mesh. |
++| `index.ts` | The system: event wiring, culling, per-frame update, debug actions. |
++
++## How to test
++
++- `npm test` runs `tests/ambient/flock.test.ts`.
++- In the browser: `?systems=world,player,camera,ambient`, then `__game.debug.run('ambient.flocks')` and `__game.debug.run('ambient.scare')`. Walk to a shoreline (for example `world.goto` or `player.teleport:925:0`) at midday.
++- `core.perf` reports a `gulls` count while any flock is being drawn.
++
++## Not done / known gaps
++
++- Not yet seen in a browser: size, speed, altitude and flap amplitude are first guesses.
++- No audio (gull calls would fit the existing `audio` recipe system).
++- Flocks do not react to the player running or driving close; only to gunfire and explosions.
++- Anchors are fixed constants, not derived from the shoreline of the generated map.
+diff --git a/src/core/Game.ts b/src/core/Game.ts
+index c66980b..d888f09 100644
+--- a/src/core/Game.ts
++++ b/src/core/Game.ts
+@@ -74,6 +74,7 @@ export class Game {
+   private lastFrameMs = 0;
+   private running = false;
+   private rafId = 0;
++  private readonly resizeListener = (): void => this.onResize();
+ 
+   constructor(readonly canvas: HTMLCanvasElement) {
+     this.params = new URLSearchParams(window.location.search);
+@@ -102,7 +103,7 @@ export class Game {
+     this.save = new Save(this.events, this.time);
+     this.debug = new Debug(this);
+ 
+-    window.addEventListener('resize', () => this.onResize());
++    window.addEventListener('resize', this.resizeListener);
+   }
+ 
+   // --- Typed accessors for foundation systems ------------------------------
+@@ -262,6 +263,7 @@ export class Game {
+ 
+   dispose(): void {
+     this.stop();
++    window.removeEventListener('resize', this.resizeListener);
+     for (let i = this.systems.all.length - 1; i >= 0; i--) {
+       const entry = this.systems.all[i];
+       this.call(entry, () => entry.instance.dispose?.());
+@@ -295,9 +297,14 @@ export class Game {
+     if (this.accumulator > fixed) this.accumulator = fixed;
+     const alpha = this.accumulator / fixed;
+ 
++    // Inline try/catch (not `this.call` with a closure) keeps this hot loop allocation-free.
+     for (const entry of this.systems.all) {
+       if (!entry.enabled || !entry.instance.update) continue;
+-      this.call(entry, () => entry.instance.update?.(dt, alpha));
++      try {
++        entry.instance.update(dt, alpha);
++      } catch (err) {
++        this.disable(entry, err);
++      }
+     }
+ 
+     this.state.timeOfDay = this.time.hour;
+@@ -317,7 +324,11 @@ export class Game {
+   private fixedStep(dt: number): void {
+     for (const entry of this.systems.all) {
+       if (!entry.enabled || !entry.instance.fixedUpdate) continue;
+-      this.call(entry, () => entry.instance.fixedUpdate?.(dt));
++      try {
++        entry.instance.fixedUpdate(dt);
++      } catch (err) {
++        this.disable(entry, err);
++      }
+     }
+     this.physics.step(dt);
+   }
+diff --git a/src/core/System.ts b/src/core/System.ts
+index 37e8eb9..6b36c64 100644
+--- a/src/core/System.ts
++++ b/src/core/System.ts
+@@ -36,6 +36,7 @@ export const PRIORITY = {
+   traffic: 210,
+   peds: 220,
+   pickups: 230,
++  ambient: 240,
+   weapons: 300,
+   damage: 310,
+   particles: 320,
+diff --git a/src/systems/ambient/SeagullRenderer.ts b/src/systems/ambient/SeagullRenderer.ts
+new file mode 100644
+index 0000000..3a180a8
+--- /dev/null
++++ b/src/systems/ambient/SeagullRenderer.ts
+@@ -0,0 +1,127 @@
++import {
++  BufferAttribute,
++  BufferGeometry,
++  DoubleSide,
++  DynamicDrawUsage,
++  Euler,
++  InstancedMesh,
++  Matrix4,
++  MeshStandardMaterial,
++  Quaternion,
++  Vector3,
++  type Group,
++} from 'three';
++import type { BirdPose } from './flock';
++
++const ZERO_MATRIX = new Matrix4().makeScale(0, 0, 0);
++
++/**
++ * One InstancedMesh for every gull: a body plus two wing triangles in a shallow V.
++ * Flapping squashes the instance's Y scale, which reads as wing beats from the ground
++ * and costs nothing per vertex. Local +Z is the flight direction.
++ */
++export class SeagullRenderer {
++  private readonly mesh: InstancedMesh;
++  private readonly geometry: BufferGeometry;
++  private readonly material: MeshStandardMaterial;
++  private readonly matrix = new Matrix4();
++  private readonly quat = new Quaternion();
++  private readonly euler = new Euler();
++  private readonly pos = new Vector3();
++  private readonly scale = new Vector3();
++
++  constructor(
++    private readonly root: Group,
++    capacity: number,
++    private readonly size: number,
++  ) {
++    this.geometry = gullGeometry();
++    this.material = new MeshStandardMaterial({
++      color: 0xffffff,
++      vertexColors: true,
++      roughness: 0.9,
++      metalness: 0,
++      side: DoubleSide,
++      flatShading: true,
++    });
++    this.mesh = new InstancedMesh(this.geometry, this.material, capacity);
++    this.mesh.instanceMatrix.setUsage(DynamicDrawUsage);
++    this.mesh.frustumCulled = false;
++    this.mesh.castShadow = false;
++    this.mesh.name = 'ambient-seagulls';
++    for (let i = 0; i < capacity; i++) this.mesh.setMatrixAt(i, ZERO_MATRIX);
++    this.mesh.count = capacity;
++    root.add(this.mesh);
++  }
++
++  setVisible(visible: boolean): void {
++    this.mesh.visible = visible;
++  }
++
++  /** `visibility` in [0, 1] shrinks the bird so it fades out at dusk instead of popping. */
++  write(index: number, pose: BirdPose, visibility: number): void {
++    const s = this.size * visibility;
++    this.pos.set(pose.x, pose.y, pose.z);
++    this.quat.setFromEuler(this.euler.set(0, pose.yaw, pose.bank, 'YXZ'));
++    this.scale.set(s, s * pose.flap, s);
++    this.matrix.compose(this.pos, this.quat, this.scale);
++    this.mesh.setMatrixAt(index, this.matrix);
++  }
++
++  commit(): void {
++    this.mesh.instanceMatrix.needsUpdate = true;
++  }
++
++  dispose(): void {
++    this.root.remove(this.mesh);
++    this.mesh.dispose();
++    this.geometry.dispose();
++    this.material.dispose();
++  }
++}
++
++/** Body, tail and two wings (with darker tips) as a single non-indexed geometry. */
++function gullGeometry(): BufferGeometry {
++  const WHITE: [number, number, number] = [0.96, 0.96, 0.94];
++  const GREY: [number, number, number] = [0.55, 0.58, 0.62];
++  const BEAK: [number, number, number] = [0.95, 0.7, 0.2];
++  type Vertex = { p: [number, number, number]; c: [number, number, number] };
++  const tris: Vertex[][] = [
++    // Body (a flat diamond) with a small beak.
++    [
++      { p: [0, 0.08, 0.5], c: BEAK },
++      { p: [-0.14, 0.04, -0.05], c: WHITE },
++      { p: [0.14, 0.04, -0.05], c: WHITE },
++    ],
++    [
++      { p: [-0.14, 0.04, -0.05], c: WHITE },
++      { p: [0, 0.02, -0.45], c: WHITE },
++      { p: [0.14, 0.04, -0.05], c: WHITE },
++    ],
++    // Left wing: root, tip, trailing edge.
++    [
++      { p: [-0.1, 0.05, 0.22], c: WHITE },
++      { p: [-1.3, 0.32, -0.12], c: GREY },
++      { p: [-0.1, 0.03, -0.28], c: WHITE },
++    ],
++    // Right wing mirrored.
++    [
++      { p: [0.1, 0.05, 0.22], c: WHITE },
++      { p: [0.1, 0.03, -0.28], c: WHITE },
++      { p: [1.3, 0.32, -0.12], c: GREY },
++    ],
++  ];
++  const positions: number[] = [];
++  const colors: number[] = [];
++  for (const tri of tris) {
++    for (const v of tri) {
++      positions.push(...v.p);
++      colors.push(...v.c);
++    }
++  }
++  const geometry = new BufferGeometry();
++  geometry.setAttribute('position', new BufferAttribute(new Float32Array(positions), 3));
++  geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
++  geometry.computeVertexNormals();
++  return geometry;
++}
+diff --git a/src/systems/ambient/config.ts b/src/systems/ambient/config.ts
+new file mode 100644
+index 0000000..8d3a10e
+--- /dev/null
++++ b/src/systems/ambient/config.ts
+@@ -0,0 +1,39 @@
++/**
++ * Ambient-life tunables. Units: meters, seconds, radians.
++ * +X is east, +Z is south (see src/data/districts.ts); the ocean surrounds the island.
++ */
++export const AmbientConfig = {
++  seagulls: {
++    /** Flock anchors sit just off the shoreline: the beach (east), the port (north) and the docks (south). */
++    flocks: [
++      { x: 925, z: -420, birds: 6 },
++      { x: 930, z: 0, birds: 7 },
++      { x: 925, z: 420, birds: 6 },
++      { x: -250, z: -905, birds: 6 },
++      { x: -350, z: 905, birds: 6 },
++    ],
++    orbitRadius: [22, 55],
++    /** Height above the water surface. */
++    height: [16, 34],
++    /** Tangential cruise speed (m/s); converted to angular speed per orbit radius. */
++    speed: [5, 8],
++    /** Wing beats per second while cruising. */
++    flapRate: [2.5, 4],
++    /** Uniform scale of the bird mesh (the base wingspan is about 2.5 m). */
++    size: 1.4,
++    /** Birds fade out as `night01` goes from `nightFadeStart` to `nightFadeEnd`. */
++    nightFadeStart: 0.55,
++    nightFadeEnd: 0.85,
++    /** Skip all work when the camera is farther than this from every flock. */
++    renderDistance: 480,
++    /** A shot within this radius of a flock anchor scatters it. */
++    gunshotScareRadius: 70,
++    explosionScareRadius: 180,
++    /** Seconds a scatter takes to settle back into a calm orbit. */
++    scareSeconds: 7,
++    /** Extra altitude and orbit growth at full scare. */
++    scareLift: 26,
++    scareRadiusGrowth: 1.6,
++    scareSpeedBoost: 1.3,
++  },
++} as const;
+diff --git a/src/systems/ambient/flock.ts b/src/systems/ambient/flock.ts
+new file mode 100644
+index 0000000..6b33820
+--- /dev/null
++++ b/src/systems/ambient/flock.ts
+@@ -0,0 +1,122 @@
++/**
++ * Pure flock math (no Three.js) so it can be unit-tested. Each bird orbits its flock
++ * anchor on a horizontal circle; a "scare" widens, lifts and speeds up the orbit and
++ * then decays back to a calm cruise.
++ */
++
++export interface FlockTuning {
++  orbitRadius: readonly [number, number];
++  height: readonly [number, number];
++  speed: readonly [number, number];
++  flapRate: readonly [number, number];
++  scareSeconds: number;
++  scareLift: number;
++  scareRadiusGrowth: number;
++  scareSpeedBoost: number;
++}
++
++export interface Bird {
++  angle: number;
++  /** Radians per second; the sign is the orbit direction. */
++  omega: number;
++  radius: number;
++  height: number;
++  flapPhase: number;
++  flapRate: number;
++  bobPhase: number;
++}
++
++export interface Flock {
++  x: number;
++  z: number;
++  /** World Y of the water surface the heights are measured from. */
++  baseY: number;
++  /** 1 right after a scare, decays to 0. */
++  scare: number;
++  birds: Bird[];
++}
++
++export interface BirdPose {
++  x: number;
++  y: number;
++  z: number;
++  /** Rotation about +Y so the bird's local +Z points along its flight direction. */
++  yaw: number;
++  /** Roll into the turn (radians). */
++  bank: number;
++  /** Wing-height multiplier (about 0.45 to 1.5). */
++  flap: number;
++}
++
++/** Minimal RNG contract so tests can pass a deterministic stub. */
++export interface FlockRng {
++  range(min: number, max: number): number;
++  sign(): number;
++}
++
++export function createFlock(x: number, z: number, count: number, baseY: number, tuning: FlockTuning, rng: FlockRng): Flock {
++  const direction = rng.sign();
++  const birds: Bird[] = [];
++  for (let i = 0; i < count; i++) {
++    const radius = rng.range(tuning.orbitRadius[0], tuning.orbitRadius[1]);
++    const speed = rng.range(tuning.speed[0], tuning.speed[1]);
++    birds.push({
++      angle: rng.range(0, Math.PI * 2),
++      // The whole flock circles the same way, with the odd bird going against the grain.
++      omega: (direction * (rng.range(0, 1) < 0.85 ? 1 : -1) * speed) / radius,
++      radius,
++      height: rng.range(tuning.height[0], tuning.height[1]),
++      flapPhase: rng.range(0, Math.PI * 2),
++      flapRate: rng.range(tuning.flapRate[0], tuning.flapRate[1]),
++      bobPhase: rng.range(0, Math.PI * 2),
++    });
++  }
++  return { x, z, baseY, scare: 0, birds };
++}
++
++/** Smooth 0..1 easing of the scare level. */
++export function scareEase(scare: number): number {
++  const s = Math.min(1, Math.max(0, scare));
++  return s * s * (3 - 2 * s);
++}
++
++export function scareFlock(flock: Flock): void {
++  flock.scare = 1;
++}
++
++export function stepFlock(flock: Flock, dt: number, tuning: FlockTuning): void {
++  if (flock.scare > 0) flock.scare = Math.max(0, flock.scare - dt / tuning.scareSeconds);
++  const s = scareEase(flock.scare);
++  const speedBoost = 1 + s * (tuning.scareSpeedBoost - 1);
++  for (const b of flock.birds) {
++    b.angle += b.omega * speedBoost * dt;
++    b.flapPhase += b.flapRate * (1 + s) * dt * Math.PI * 2;
++  }
++}
++
++/** Writes the pose of `bird` into `out` for the flock's current state. */
++export function poseOf(flock: Flock, bird: Bird, tuning: FlockTuning, out: BirdPose): BirdPose {
++  const s = scareEase(flock.scare);
++  const radius = bird.radius * (1 + s * (tuning.scareRadiusGrowth - 1));
++  const sin = Math.sin(bird.angle);
++  const cos = Math.cos(bird.angle);
++  out.x = flock.x + cos * radius;
++  out.z = flock.z + sin * radius;
++  out.y = flock.baseY + bird.height + s * tuning.scareLift + Math.sin(bird.angle * 2 + bird.bobPhase) * 1.2;
++  const dir = bird.omega >= 0 ? 1 : -1;
++  // d/dθ of (cos, sin) is (-sin, cos); flip for clockwise orbits.
++  const fx = -sin * dir;
++  const fz = cos * dir;
++  out.yaw = Math.atan2(fx, fz);
++  out.bank = -dir * (0.3 - 0.15 * s);
++  // Gliding is a gentle shimmer; a scatter is full wing beats.
++  out.flap = 0.95 + (0.08 + 0.42 * s) * Math.sin(bird.flapPhase);
++  return out;
++}
++
++/** 1 in daylight, 0 at night, linear between the two thresholds. */
++export function nightVisibility(night01: number, fadeStart: number, fadeEnd: number): number {
++  if (night01 <= fadeStart) return 1;
++  if (night01 >= fadeEnd) return 0;
++  return 1 - (night01 - fadeStart) / (fadeEnd - fadeStart);
++}
+diff --git a/src/systems/ambient/index.ts b/src/systems/ambient/index.ts
+new file mode 100644
+index 0000000..89facfa
+--- /dev/null
++++ b/src/systems/ambient/index.ts
+@@ -0,0 +1,119 @@
++import { Config } from '../../core/Config';
++import type { V3 } from '../../core/entities';
++import type { Game } from '../../core/Game';
++import { Random } from '../../core/Random';
++import { PRIORITY, type GameSystem, type SystemModule } from '../../core/System';
++import { AmbientConfig } from './config';
++import { createFlock, nightVisibility, poseOf, scareFlock, stepFlock, type BirdPose, type Flock } from './flock';
++import { SeagullRenderer } from './SeagullRenderer';
++
++const G = AmbientConfig.seagulls;
++
++/**
++ * Cosmetic world life that no other system owns. Today: seagull flocks circling the
++ * shoreline by day. They scatter on gunfire and explosions, fade out at dusk and cost
++ * one draw call. Nothing here is saved or affects gameplay.
++ */
++export class AmbientSystem implements GameSystem {
++  private flocks: Flock[] = [];
++  private renderer: SeagullRenderer | null = null;
++  private readonly offs: Array<() => void> = [];
++  private readonly pose: BirdPose = { x: 0, y: 0, z: 0, yaw: 0, bank: 0, flap: 1 };
++
++  constructor(private readonly game: Game) {}
++
++  init(): void {
++    const rng = Random.fromString('leonida-ambient-seagulls');
++    const baseY = Config.world.waterLevel;
++    let total = 0;
++    for (const f of G.flocks) {
++      this.flocks.push(createFlock(f.x, f.z, f.birds, baseY, G, rng));
++      total += f.birds;
++    }
++    this.renderer = new SeagullRenderer(this.game.worldRoot, total, G.size);
++
++    const ev = this.game.events;
++    this.offs.push(
++      ev.on('weapon:fired', ({ origin }) => this.scatterNear(origin, G.gunshotScareRadius)),
++      ev.on('vehicle:exploded', ({ position }) => this.scatterNear(position, G.explosionScareRadius)),
++    );
++  }
++
++  /** Scatters every flock whose anchor is within `radius` of `at`; returns how many were scared. */
++  private scatterNear(at: V3, radius: number): number {
++    let scared = 0;
++    const r2 = radius * radius;
++    for (const flock of this.flocks) {
++      const dx = flock.x - at.x;
++      const dz = flock.z - at.z;
++      if (dx * dx + dz * dz <= r2) {
++        scareFlock(flock);
++        scared++;
++      }
++    }
++    return scared;
++  }
++
++  update(dt: number): void {
++    const renderer = this.renderer;
++    if (!renderer) return;
++    // Interiors hide the world root already; skip the math as well.
++    if (this.game.state.interior !== null) return;
++    const night = this.game.systems.has('world') ? this.game.world.night01 : 0;
++    const visibility = nightVisibility(night, G.nightFadeStart, G.nightFadeEnd);
++    if (visibility <= 0.01) {
++      renderer.setVisible(false);
++      return;
++    }
++    const cam = this.game.viewCamera.position;
++    const maxD2 = (G.renderDistance + G.orbitRadius[1] * G.scareRadiusGrowth) ** 2;
++    let nearAny = false;
++    for (const flock of this.flocks) {
++      const dx = flock.x - cam.x;
++      const dz = flock.z - cam.z;
++      if (dx * dx + dz * dz <= maxD2) {
++        nearAny = true;
++        break;
++      }
++    }
++    renderer.setVisible(nearAny);
++    if (!nearAny) return;
++
++    let index = 0;
++    for (const flock of this.flocks) {
++      stepFlock(flock, dt, G);
++      for (const bird of flock.birds) {
++        renderer.write(index++, poseOf(flock, bird, G, this.pose), visibility);
++      }
++    }
++    renderer.commit();
++    this.game.perf.set('gulls', index);
++  }
++
++  dispose(): void {
++    for (const off of this.offs) off();
++    this.offs.length = 0;
++    this.renderer?.dispose();
++    this.renderer = null;
++    this.flocks = [];
++  }
++
++  debugActions = {
++    /** `ambient.scare` scatters every flock regardless of distance. */
++    scare: (): number => {
++      for (const f of this.flocks) scareFlock(f);
++      return this.flocks.length;
++    },
++    /** `ambient.flocks` lists anchors and current scare levels. */
++    flocks: (): Array<{ x: number; z: number; birds: number; scare: number }> =>
++      this.flocks.map((f) => ({ x: f.x, z: f.z, birds: f.birds.length, scare: Number(f.scare.toFixed(2)) })),
++  };
++}
++
++const module: SystemModule = {
++  id: 'ambient',
++  priority: PRIORITY.ambient,
++  create: (game) => new AmbientSystem(game),
++};
++
++export default module;
+diff --git a/tests/ambient/flock.test.ts b/tests/ambient/flock.test.ts
+new file mode 100644
+index 0000000..f3ede5e
+--- /dev/null
++++ b/tests/ambient/flock.test.ts
+@@ -0,0 +1,81 @@
++import { describe, expect, it } from 'vitest';
++import { Random } from '../../src/core/Random';
++import { AmbientConfig } from '../../src/systems/ambient/config';
++import { createFlock, nightVisibility, poseOf, scareEase, scareFlock, stepFlock, type BirdPose } from '../../src/systems/ambient/flock';
++
++const G = AmbientConfig.seagulls;
++const pose = (): BirdPose => ({ x: 0, y: 0, z: 0, yaw: 0, bank: 0, flap: 1 });
++
++describe('seagull flocks', () => {
++  it('creates the requested number of birds inside the configured ranges', () => {
++    const flock = createFlock(100, -50, 8, 0, G, Random.fromString('t'));
++    expect(flock.birds).toHaveLength(8);
++    for (const b of flock.birds) {
++      expect(b.radius).toBeGreaterThanOrEqual(G.orbitRadius[0]);
++      expect(b.radius).toBeLessThanOrEqual(G.orbitRadius[1]);
++      expect(b.height).toBeGreaterThanOrEqual(G.height[0]);
++      expect(b.height).toBeLessThanOrEqual(G.height[1]);
++    }
++  });
++
++  it('keeps every bird on its orbit around the anchor while calm', () => {
++    const flock = createFlock(100, -50, 6, 0, G, Random.fromString('orbit'));
++    const out = pose();
++    for (let i = 0; i < 300; i++) {
++      stepFlock(flock, 1 / 60, G);
++      for (const b of flock.birds) {
++        poseOf(flock, b, G, out);
++        expect(Math.hypot(out.x - 100, out.z + 50)).toBeCloseTo(b.radius, 5);
++      }
++    }
++  });
++
++  it('points the bird along its direction of travel', () => {
++    const flock = createFlock(0, 0, 4, 0, G, Random.fromString('heading'));
++    const a = pose();
++    const b = pose();
++    for (const bird of flock.birds) {
++      poseOf(flock, bird, G, a);
++      const dt = 0.01;
++      bird.angle += bird.omega * dt;
++      poseOf(flock, bird, G, b);
++      const vx = b.x - a.x;
++      const vz = b.z - a.z;
++      expect(Math.sin(a.yaw) * vx + Math.cos(a.yaw) * vz).toBeGreaterThan(0);
++    }
++  });
++
++  it('scatters upward and outward, then settles back', () => {
++    const flock = createFlock(0, 0, 3, 0, G, Random.fromString('scare'));
++    const bird = flock.birds[0];
++    const calm = poseOf(flock, bird, G, pose());
++    const calmRadius = Math.hypot(calm.x, calm.z);
++    const calmY = calm.y;
++    scareFlock(flock);
++    const scared = poseOf(flock, bird, G, pose());
++    expect(scared.y).toBeGreaterThan(calmY + G.scareLift * 0.9);
++    expect(Math.hypot(scared.x, scared.z)).toBeGreaterThan(calmRadius * 1.4);
++    for (let i = 0; i < 60 * (G.scareSeconds + 1); i++) stepFlock(flock, 1 / 60, G);
++    expect(flock.scare).toBe(0);
++  });
++
++  it('eases the scare level monotonically within 0..1', () => {
++    let last = -1;
++    for (let i = 0; i <= 20; i++) {
++      const e = scareEase(i / 20);
++      expect(e).toBeGreaterThanOrEqual(last);
++      expect(e).toBeGreaterThanOrEqual(0);
++      expect(e).toBeLessThanOrEqual(1);
++      last = e;
++    }
++    expect(scareEase(-3)).toBe(0);
++    expect(scareEase(4)).toBe(1);
++  });
++
++  it('fades out between the night thresholds', () => {
++    expect(nightVisibility(0, G.nightFadeStart, G.nightFadeEnd)).toBe(1);
++    expect(nightVisibility(1, G.nightFadeStart, G.nightFadeEnd)).toBe(0);
++    const mid = nightVisibility((G.nightFadeStart + G.nightFadeEnd) / 2, G.nightFadeStart, G.nightFadeEnd);
++    expect(mid).toBeCloseTo(0.5);
++  });
++});
